@@ -1,0 +1,114 @@
+rules_version = '2';
+
+// Deny-by-default. A client (the Expo app, authenticated as a Firebase user)
+// may only touch its own `users/{uid}/**` subtree, and even there:
+//   - Plaid items / accounts / insights / syncState are read-only (the
+//     Admin-SDK backend writes them, so an app bug cannot corrupt pipeline data).
+//   - Transactions are read-only for Plaid-sourced core fields, but the owner
+//     MAY edit annotation fields (category, notes, lock), create manual
+//     transactions, and delete their own manual transactions.
+//   - `_private/**` (access tokens) is denied entirely — server-side only.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    match /users/{uid} {
+      // Profile: owner may read and write (settings, tz, currency, etc.).
+      allow read: if isOwner(uid);
+      allow write: if isOwner(uid);
+
+      // Access tokens and any other server-only state. No client access at all.
+      match /_private/{document=**} {
+        allow read, write: if false;
+      }
+
+      // Linked banks — client reads them (Settings screen). Writes go through
+      // Cloud Functions (exchange/unlink) using the Admin SDK.
+      match /plaidItems/{itemId} {
+        allow read: if isOwner(uid);
+        allow write: if false;
+      }
+
+      // Balances/metadata written by the exchange function and nightly sync.
+      match /accounts/{accountId} {
+        allow read: if isOwner(uid);
+        allow write: if false;
+      }
+
+      // Transactions: read own; edit only annotation fields; create/delete only
+      // manual transactions.
+      match /transactions/{txnId} {
+        allow read: if isOwner(uid);
+
+        // Manual transactions the user adds by hand. Pin the trusted shape so a
+        // client cannot spoof a Plaid itemId, inject junk fields, or write
+        // wrong-typed values (the app's zod schema is NOT enforced server-side).
+        allow create: if isOwner(uid)
+          && request.resource.data.isManual == true
+          && request.resource.data.itemId == 'manual'
+          && request.resource.data.amount is number
+          && request.resource.data.date is timestamp
+          && request.resource.data.name is string
+          && request.resource.data.name.size() > 0
+          && request.resource.data.name.size() <= 140
+          && request.resource.data.pending == false
+          && request.resource.data.keys().hasOnly([
+            'accountId', 'itemId', 'date', 'month', 'amount', 'isoCurrencyCode',
+            'name', 'merchantName', 'nameLower', 'categoryId', 'categoryName',
+            'pending', 'manualCategoryLock', 'notes', 'isManual', 'createdAt', 'updatedAt'
+          ]);
+
+        // Only annotation fields may change; Plaid-sourced fields stay immutable.
+        allow update: if isOwner(uid)
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['categoryId', 'categoryName', 'notes', 'manualCategoryLock', 'updatedAt']);
+
+        // Users may remove only transactions they created manually.
+        allow delete: if isOwner(uid) && resource.data.isManual == true;
+      }
+
+      // Categories: owner CRUD (rename/merge/recolor/archive/create). Constrain
+      // the field set + createdBy so a client can't inject unexpected keys. Note
+      // request.resource.data is the post-merge document, so partial updates and
+      // full creates are both validated against the same allowed key set.
+      match /categories/{categoryId} {
+        allow read: if isOwner(uid);
+        allow write: if isOwner(uid)
+          && request.resource.data.createdBy in ['ai', 'user']
+          && request.resource.data.keys().hasOnly([
+            'name', 'description', 'color', 'icon', 'isArchived',
+            'createdBy', 'createdAt', 'updatedAt'
+          ]);
+      }
+
+      // Budgets: owner CRUD (monthly caps). Key-set is pinned; deeper numeric
+      // validation (nonnegative caps) is done client-side via zod (budgetEditSchema)
+      // and re-clamped by the pipeline, since rules can't iterate a map's values.
+      match /budgets/{month} {
+        allow read: if isOwner(uid);
+        allow write: if isOwner(uid)
+          && request.resource.data.keys().hasOnly(['month', 'perCategory', 'totalCap', 'updatedAt']);
+      }
+
+      // AI insights: written by the nightly pipeline only.
+      match /insights/{date} {
+        allow read: if isOwner(uid);
+        allow write: if false;
+      }
+
+      // Push tokens: the device registers/refreshes its own token.
+      match /pushTokens/{tokenId} {
+        allow read, write: if isOwner(uid);
+      }
+
+      // Pipeline bookkeeping: read-only for the client (e.g. "last synced" UI).
+      match /syncState/{doc} {
+        allow read: if isOwner(uid);
+        allow write: if false;
+      }
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "expense-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multi-tenant personal expense manager: Expo app + Firebase Functions + GitHub Actions nightly pipeline with Plaid + Gemini.",
+  "workspaces": [
+    "packages/*",
+    "app"
+  ],
+  "scripts": {
+    "build:shared": "npm run build --workspace @expense/shared",
+    "typecheck": "npm run typecheck --workspace @expense/shared && npm run typecheck --workspace app",
+    "typecheck:functions": "npm --prefix functions run typecheck",
+    "lint": "echo 'add eslint per-workspace as needed'",
+    "app": "npm --workspace app run start",
+    "pipeline:local": "npm --prefix functions run pipeline:local",
+    "functions:serve": "npm --prefix functions run serve"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
